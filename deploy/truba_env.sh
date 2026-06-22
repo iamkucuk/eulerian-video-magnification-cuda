@@ -28,7 +28,16 @@ module purge 2>/dev/null || true
 module load "${EVM_GCC_MODULE:-comp/gcc/12.3.0}"
 module load "${EVM_PYTHON_MODULE:-comp/python/miniconda3}"
 module load "${EVM_CUDA_MODULE:-lib/cuda/12.6}"
-module load "${EVM_CMAKE_MODULE:-comp/cmake/3.31.1}"
+module load "${EVM_CMAKE_MODULE:-comp/cmake/3.31.1}" 2>/dev/null || true
+
+# cmake isn't present on all partitions (palamut has the module, kolyoz
+# doesn't). If `module load` didn't provide it, fall back to a pip-installed
+# cmake wheel inside the venv (set up below).
+if ! command -v cmake >/dev/null 2>&1; then
+    export EVM_NEED_PIP_CMAKE=1
+else
+    export EVM_NEED_PIP_CMAKE=0
+fi
 
 export CUDAHOSTCXX="$(command -v g++)"
 export CC="$(command -v gcc)"
@@ -45,23 +54,39 @@ else
     VENV_ALWAYS_FRESH=0
 fi
 
-need_build=0
-if [[ "$VENV_ALWAYS_FRESH" == "1" ]] || [[ ! -d "$VENV/lib" ]]; then
-    need_build=1
-fi
-
-if [[ "$need_build" == "1" ]]; then
+if [[ "$VENV_ALWAYS_FRESH" == "1" ]]; then
+    # /tmp venv: always rebuild (node-local, doesn't persist between jobs).
+    # Also remove the stale WEKA .venv marker so we never accidentally
+    # try to activate the wrong venv.
+    rm -f "$PROJECT_ROOT/.venv/.evm_deps_marker"
+    echo "[truba_env] building fresh venv at $VENV" >&2
+    rm -rf "$VENV"
+    python3 -m venv "$VENV"
+    # Use the venv's python directly (more robust than `source activate`).
+    export PYTHONPATH=""
+    export PATH="$VENV/bin:$PATH"
+    hash -r 2>/dev/null || true
+    python3 -m pip install --quiet \
+        -r "$PROJECT_ROOT/requirements.txt" pybind11 pytest
+    if [[ "$EVM_NEED_PIP_CMAKE" == "1" ]]; then
+        python3 -m pip install --quiet cmake
+    fi
+elif [[ ! -d "$VENV/lib" ]]; then
     echo "[truba_env] building venv at $VENV" >&2
     rm -rf "$VENV"
     python3 -m venv "$VENV"
-    # shellcheck disable=SC1091
-    source "$VENV/bin/activate"
+    export PATH="$VENV/bin:$PATH"
+    hash -r 2>/dev/null || true
     python3 -m pip install --quiet \
         -r "$PROJECT_ROOT/requirements.txt" pybind11 pytest
+    if [[ "$EVM_NEED_PIP_CMAKE" == "1" ]]; then
+        python3 -m pip install --quiet cmake
+    fi
     touch "$VENV/.evm_deps_marker"
 else
-    # shellcheck disable=SC1091
-    source "$VENV/bin/activate"
+    # Persistent WEKA venv from a prior session.
+    export PATH="$VENV/bin:$PATH"
+    hash -r 2>/dev/null || true
 fi
 
 # pybind11 needs to know where its headers are; expose them for CMake.
